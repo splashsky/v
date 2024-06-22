@@ -4,85 +4,96 @@
 module auth
 
 import rand
-import crypto.rand as crypto_rand
-import crypto.sha256
+import crypto.bcrypt
 
-const max_safe_unsigned_integer = u32(4_294_967_295)
+// Strategies for password hashing.
+// - bcrypt - The default strategy. Uses a sensible default cost.
+enum Strategy as u8 {
+	bcrypt
+}
 
 pub struct Auth[T] {
 	db T
-	// pub:
-	// salt string
+	strategy u8
 }
 
+@[table: 'tokens']
 pub struct Token {
 pub:
-	id      int    @[primary; sql: serial]
-	user_id int
-	value   string
-	// ip      string
+	user_id int    @[primary; unique]
+	token   string
+	// implement expiration?
+	// implement IP tracking?
 }
 
-pub fn new[T](db T) Auth[T] {
-	set_rand_crypto_safe_seed()
+// Initialize an instance of Auth with your database driver of choice.
+// This will create the 'tokens' table with the 'Token' struct.
+// 
+// You can also optionally define a password hashing strategy from the 
+// auth.Strategy enum; this defaults to bcrypt (0).
+pub fn new[T](db T, strategy ?u8) Auth[T] {
 	sql db {
 		create table Token
 	} or { eprintln('veb.auth: failed to create table Token') }
-	return Auth[T]{
+
+	if strategy == none {
+		strategy = auth.Strategy.bcrypt
+	}
+
+	return Auth[T] {
 		db: db
-		// salt: generate_salt()
+		strategy: strategy
 	}
 }
 
-// fn (mut app App) add_token(user_id int, ip string) !string {
+// Insert an authentication token with the user's ID.
 pub fn (mut app Auth[T]) add_token(user_id int) !string {
 	mut uuid := rand.uuid_v4()
+
 	token := Token{
 		user_id: user_id
 		value: uuid
-		// ip: ip
 	}
+
 	sql app.db {
 		insert token into Token
 	}!
+
 	return uuid
 }
 
-pub fn (app &Auth[T]) find_token(value string) ?Token {
+// Find a user's token by their user ID.
+pub fn (app &Auth[T]) find_token_by_id(user_id int) ?Token {
 	tokens := sql app.db {
-		select from Token where value == value limit 1
+		select from Token where user_id == user_id limit 1
 	} or { []Token{} }
+
 	if tokens.len == 0 {
 		return none
 	}
+
 	return tokens.first()
 }
 
+// Delete all tokens associated with the user ID.
 pub fn (mut app Auth[T]) delete_tokens(user_id int) ! {
 	sql app.db {
 		delete from Token where user_id == user_id
 	}!
 }
 
-pub fn set_rand_crypto_safe_seed() {
-	first_seed := generate_crypto_safe_int_u32()
-	second_seed := generate_crypto_safe_int_u32()
-	rand.seed([first_seed, second_seed])
+// Hash a password using the chosen hashing strategy.
+fn (mut a Auth[T]) hash_password(password string) !string {
+	return match a.strategy {
+		0 { bcrypt.generate_from_password(password.bytes(), 15)! }
+		else { bcrypt.generate_from_password(password.bytes(), 15)! }
+	}
 }
 
-fn generate_crypto_safe_int_u32() u32 {
-	return u32(crypto_rand.int_u64(auth.max_safe_unsigned_integer) or { 0 })
-}
-
-pub fn generate_salt() string {
-	return rand.i64().str()
-}
-
-pub fn hash_password_with_salt(plain_text_password string, salt string) string {
-	salted_password := '${plain_text_password}${salt}'
-	return sha256.sum(salted_password.bytes()).hex().str()
-}
-
-pub fn compare_password_with_hash(plain_text_password string, salt string, hashed string) bool {
-	return hash_password_with_salt(plain_text_password, salt) == hashed
+// Check a hashed password using the chosen hashing strategy.
+fn (mut a Auth[T]) check_password(password string, hash string) bool {
+	return match a.strategy {
+		0 { bcrypt.compare_hash_and_password(password.bytes(), hash.bytes())! }
+		else { bcrypt.compare_hash_and_password(password.bytes(), hash.bytes())! }
+	}
 }
